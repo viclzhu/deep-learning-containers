@@ -209,9 +209,8 @@ def test_smmodelparallel_v2_gptneox_multigpu_singlenode_flashattn(
     instance_type = "ml.p4d.24xlarge"
     tensor_parallel_degree = 2  # An integer in [1, WORLD_SIZE]. Note: we recommend using TP_DEGREE in [1,8] for intra-node communication as inter-node TP communication is slow.
     hybrid_shard_degree = 4  # An integer in {0, [2, WORLD_SIZE // TP_DEGREE]} and defaults to 0.
-    offload_activations = True  # Enables SM activation offloading implementation.
+    offload_activations = False  # Enables SM activation offloading implementation.
     activation_loading_horizon = 2  # Activation loading horizon. An integer >= 1 and defaults to 2.
-    save_steps = 50  # Save step interval.
     max_steps = 100  # Maximum training steps.
 
     hyperparameters = {
@@ -232,9 +231,7 @@ def test_smmodelparallel_v2_gptneox_multigpu_singlenode_flashattn(
         "plateau": 0.0,
         "delayed_param": 1,
         "num_kept_checkpoints": 2,
-        "checkpoint_freq": save_steps,
         "checkpoint_dir": "/opt/ml/checkpoints",
-        "validation_freq": save_steps,
         "logging_freq": 1,
         "weight_decay": 0.2,
         "clean_cache": 0,
@@ -247,10 +244,9 @@ def test_smmodelparallel_v2_gptneox_multigpu_singlenode_flashattn(
         "sharding_strategy": "hybrid_shard",
         "auto_wrap_policy": "transformer_auto_wrap_policy",
         "model_type": "gpt_neox",
-        "offload_activations": False,
+        "offload_activations": offload_activations,
         "use_smp_flash_attn": 1,
         "use_synthetic_data": 1,
-        "zipped_data": 1,
     }
     # train = sagemaker.session.s3_input(
     #     "s3://gpt2-data/train_synthetic_small/",
