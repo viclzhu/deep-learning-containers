@@ -34,6 +34,7 @@ from ...integration import (
     DEFAULT_TIMEOUT,
     mnist_path,
     gpt2_path,
+    gptneox_path,
 )
 from ...integration.sagemaker.timeout import timeout
 from .... import invoke_pytorch_helper_function
@@ -48,12 +49,25 @@ def validate_or_skip_smmodelparallel(ecr_image):
         pytest.skip("Model Parallelism is supported on CUDA 11 on PyTorch v1.6 and above")
 
 
+def validate_or_skip_smmodelparallel_v2(ecr_image):
+    if not can_run_smmodelparallel_v2(ecr_image):
+        pytest.skip("Model Parallelism is supported on CUDA 11 on PyTorch v2.0.1.")
+
+
 def can_run_smmodelparallel(ecr_image):
     _, image_framework_version = get_framework_and_version_from_tag(ecr_image)
     image_cuda_version = get_cuda_version_from_tag(ecr_image)
     return Version(image_framework_version) in SpecifierSet(">=1.6") and Version(
         image_cuda_version.strip("cu")
     ) >= Version("110")
+
+
+def can_run_smmodelparallel_v2(ecr_image):
+    _, image_framework_version = get_framework_and_version_from_tag(ecr_image)
+    image_cuda_version = get_cuda_version_from_tag(ecr_image)
+    return Version(image_framework_version) in SpecifierSet("==2.0.1") and Version(
+        image_cuda_version.strip("cu")
+    ) == Version("118")
 
 
 def validate_or_skip_smmodelparallel_efa(ecr_image):
@@ -168,6 +182,115 @@ def test_dist_operations_fastai_gpu(framework_version, ecr_image, sagemaker_regi
 
     model_s3_url = pytorch.create_model().model_data
     _assert_s3_file_exists(sagemaker_session.boto_region_name, model_s3_url)
+
+
+@pytest.mark.usefixtures("feature_smmp_present")
+@pytest.mark.integration("smmodelparallel")
+@pytest.mark.model("gpt_neox")
+@pytest.mark.processor("gpu")
+# @pytest.mark.skip_cpu
+# @pytest.mark.skip_py2_containers
+# @pytest.mark.skip_trcomp_containers
+# @pytest.mark.skip_pt
+# @pytest.mark.skip_pt21_test
+@pytest.mark.team("smmodelparallel")
+@pytest.mark.parametrize("test_script", [("train.py")])
+def test_smmodelparallel_v2_gptneox_multigpu_singlenode_flashattn(
+    ecr_image, instance_type, sagemaker_regions, test_script,
+):
+    """
+    Tests pt gptneox command via script mode
+    """
+    print("ECR_IMAGE: BEFORE:", ecr_image)
+    ecr_image = "855988369404.dkr.ecr.us-west-2.amazonaws.com/sm-pytorch-conda-builder:cu118_dlc_latest"
+    # # framework, framework_version = get_framework_and_version_from_tag(ecr_image)
+    # if Version(framework_version) in SpecifierSet("<2.0.1"):
+    #     pytest.skip("Skipping the test for older than PT 2.0.1")
+    instance_type = "ml.p4d.24xlarge"
+    tensor_parallel_degree = 2  # An integer in [1, WORLD_SIZE]. Note: we recommend using TP_DEGREE in [1,8] for intra-node communication as inter-node TP communication is slow.
+    hybrid_shard_degree = 4  # An integer in {0, [2, WORLD_SIZE // TP_DEGREE]} and defaults to 0.
+    offload_activations = True  # Enables SM activation offloading implementation.
+    activation_loading_horizon = 2  # Activation loading horizon. An integer >= 1 and defaults to 2.
+    save_steps = 50  # Save step interval.
+    max_steps = 100  # Maximum training steps.
+
+    hyperparameters = {
+        "train_batch_size": 2,
+        "val_batch_size": 4,
+        "fast_validation": 0,
+        "max_steps": max_steps,
+        "epochs": 100,
+        "seed": 12345,
+        "bf16": 1,
+        "lr": 0.0001,
+        "min_lr": 1e-05,
+        "beta1": 0.9,
+        "beta2": 0.95,
+        "lr_decay_style": "cosine",
+        "lr_decay_iters": 47683,
+        "warmup": 0.0032,
+        "plateau": 0.0,
+        "delayed_param": 1,
+        "num_kept_checkpoints": 2,
+        "checkpoint_freq": save_steps,
+        "checkpoint_dir": "/opt/ml/checkpoints",
+        "validation_freq": save_steps,
+        "logging_freq": 1,
+        "weight_decay": 0.2,
+        "clean_cache": 0,
+        "activation_checkpointing": 1,
+        "enable_memory_profiling": 0,
+        "forward_prefetch": 1,
+        "vocab_size": 50257,
+        "limit_all_gathers": 1,
+        "backward_fetch_policy": "backward_pre",
+        "sharding_strategy": "hybrid_shard",
+        "auto_wrap_policy": "transformer_auto_wrap_policy",
+        "model_type": "gpt_neox",
+        "offload_activations": False,
+        "use_smp_flash_attn": 1,
+        "use_synthetic_data": 1,
+        "zipped_data": 1,
+    }
+    # train = sagemaker.session.s3_input(
+    #     "s3://gpt2-data/train_synthetic_small/",
+    #     distribution="FullyReplicated",
+    #     content_type="application/tfrecord",
+    #     s3_data_type="S3Prefix",
+    # )
+    # inputs = {"train": train, "test": train}
+    # validate_or_skip_smmodelparallel_v2(ecr_image)
+    with timeout(minutes=DEFAULT_TIMEOUT):
+        estimator_parameter = {
+            "entry_point": test_script,
+            "role": "SageMakerRole",
+            "source_dir": gptneox_path,
+            "instance_count": 1,
+            "instance_type": instance_type,
+            "hyperparameters": hyperparameters,
+            "distribution": {
+                "torch_distributed": { "enabled": True }, # Use torchrun.
+                "smdistributed": {
+                    "modelparallel": {
+                        "enabled": True,
+                        "parameters": {
+                            "tensor_parallel_degree": tensor_parallel_degree,
+                            "hybrid_shard_degree": hybrid_shard_degree,
+                            "sm_activation_offloading": offload_activations,
+                            "activation_loading_horizon": activation_loading_horizon,
+                        },
+                    }
+                },
+            },
+        }
+        job_name_prefix = "test-pt-smdmpv2-gptneox-singlenode-flashattn"
+        invoke_pytorch_estimator(
+            ecr_image,
+            sagemaker_regions,
+            estimator_parameter,
+            # inputs=inputs,
+            job_name=job_name_prefix,
+        )
 
 
 @pytest.mark.usefixtures("feature_smmp_present")
